@@ -34,13 +34,13 @@ Interface will be via PGN files, and we'll use lichess (or any other standard to
 
 # Resources
 
-./sample.pgn
-./sample[12].png
-/usr/share/doc/stockfish/engine-interface.txt.gz
-https://github.com/official-stockfish/Stockfish/wiki/UCI-&-Commands#standard-commands
-https://backscattering.de/chess/uci/
-https://www.chessprogramming.org/Portable_Game_Notation
-https://github.com/fsmosca/PGN-Standard/blob/master/PGN-Standard.txt
+- ./sample.pgn
+- ./sample[12].png
+- /usr/share/doc/stockfish/engine-interface.txt.gz
+- https://github.com/official-stockfish/Stockfish/wiki/UCI-&-Commands#standard-commands
+- https://backscattering.de/chess/uci/
+- https://www.chessprogramming.org/Portable_Game_Notation
+- https://github.com/fsmosca/PGN-Standard/blob/master/PGN-Standard.txt
 
 # Components / Phases
 
