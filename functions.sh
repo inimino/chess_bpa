@@ -12,3 +12,7 @@ code_prompt() {
     echo '```'
   ) | xclip -i -selection clipboard
 }
+
+build() {
+  gcc -o bpa bpa.c
+}

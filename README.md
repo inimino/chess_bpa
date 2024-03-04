@@ -6,6 +6,19 @@ Interface will be via PGN files, and we'll use lichess (or any other standard to
 
 YouTube playlist about this tool [here](https://www.youtube.com/playlist?list=PLjma_kMa78BOuUN5gsud0k0igNy8uih_m).
 
+The first working version was created with all code written by GPT4.
+There were a few manual bug fixes made to finish the original project in one week; these are marked in the code with "manual fixup" comments.
+
+# Usage
+
+There are no dependencies and all the code is in one file.
+Compile with e.g. `gcc -o bpa bpa.c`.
+You will need stockfish installed and in your PATH, i.e. you should be able to run "stockfish" at the terminal.
+This is how bpa will launch stockfish, so if you want to launch it differently you can also just edit the code in bpa.c where stockfish is launched.
+Then perform analysis like `bpa < input_game.pgn > output_annotated.pgn`, i.e. the tool is just a filter that takes PGN input on stdin and responds on stdout.
+The tool will just analyze the main line of the game and add its annotations as arrows.
+You can then open the resulting PGN on lichess or some other chess software and you will see the arrows.
+
 # Requirements
 
 - We want ChatGPT to write all the code.
