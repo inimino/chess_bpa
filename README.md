@@ -4,6 +4,8 @@
 The tool should help us explore big picture analysis ideas and test whether they are useful on real games.
 Interface will be via PGN files, and we'll use lichess (or any other standard tool) to view the annotations (see sample1.png and 2).
 
+YouTube playlist about this tool [here](https://www.youtube.com/playlist?list=PLjma_kMa78BOuUN5gsud0k0igNy8uih_m).
+
 # Requirements
 
 - We want ChatGPT to write all the code.
