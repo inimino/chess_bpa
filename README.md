@@ -19,6 +19,9 @@ Then perform analysis like `bpa < input_game.pgn > output_annotated.pgn`, i.e. t
 The tool will just analyze the main line of the game and add its annotations as arrows.
 You can then open the resulting PGN on lichess or some other chess software and you will see the arrows.
 
+You can use `--analysis-time <ms>` to change the default (from 1000 = 1s).
+This is the amount we let stockfish consider, so the number of half-moves in the game times this is the total runtime for the analysis.
+
 # Requirements
 
 - We want ChatGPT to write all the code.

@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <ctype.h>
+#include <limits.h>
 
 /* convenient debugging macros */
 #define dbgd(x) prt(#x ": %d\n", x),flush()
@@ -82,11 +83,12 @@ void wrs_esc();
 void save();
 void push(span);
 void pop(span*);
-void advance(span*);
+void advance1(span*);
+void advance(span*,int);
 int find_char(span s, char c);
 span pop_into_span();
-span head_n(int, span*);
-span take_n(span, int);
+span take_n(int, span*);
+span first_n(span, int);
 int span_eq(span, span);
 int span_cmp(span, span);
 span S(char*);
@@ -129,7 +131,12 @@ void sp() {
 
 /* we might have a generic take() which would take from inp */
 /* we might have the same kind of redir_i() as we have redir() already, where we redirect input to come from a span and then use standard functions like take() and get rid of these special cases for taking input from streams or spans. */
-span head_n(int n, span *io) {
+
+/* take_n is a mutating function which takes the first n chars of the span into a new span, and also modifies the input span to remove this same prefix.
+After a function call such as `span new = take_n(x, s)`, it will be the case that `new` contatenated with `s` is equivalent to `s` before the call.
+*/
+
+span take_n(int n, span *io) {
   span ret;
   ret.buf = io->buf;
   ret.end = io->buf + n;
@@ -152,15 +159,6 @@ int span_eq(span s1, span s2) {
   if (len(s1) != len(s2)) return 0;
   for (int i = 0; i < len(s1); ++i) if (s1.buf[i] != s2.buf[i]) return 0;
   return 1;
-}
-
-int span_cmp(span s1, span s2) {
-  for (;;) {
-    if (empty(s1) && !empty(s2)) return 1;
-    if (empty(s2) && !empty(s1)) return -1;
-    int dif = *(s1.buf++) - *(s2.buf++);
-    if (dif) return dif;
-  }
 }
 
 span S(char *s) {
@@ -330,11 +328,25 @@ void pop(span *s) {
   s->buf = save_stack[--save_count];
 }
 
-void advance(span *s) {
-  s->buf++;
+void advance1(span *s) {
+    if (!empty(*s)) s->buf++;
+}
+
+void advance(span *s, int n) {
+    if (len(*s) >= n) s->buf += n;
+    else s->buf = s->end; // Move to the end if n exceeds span length
 }
 
 // new code to copy back
+int span_cmp(span s1, span s2) {
+  for (;;) {
+    if (empty(s1) && !empty(s2)) return 1;
+    if (empty(s2) && !empty(s1)) return -1;
+    if (empty(s1)) return 0;
+    int dif = *(s1.buf++) - *(s2.buf++);
+    if (dif) return dif;
+  }
+}
 
 int contains(span, span);
 
@@ -365,6 +377,46 @@ int find_char(span s, char c) {
     if (s.buf[i] == c) return i;
   }
   return -1; // Character not found
+}
+
+span next_line(span*);
+
+/* next_line(span*) shortens the input span and returns the first line as a new span.
+The newline is consumed and is not part of either the returned span or the input span after the call.
+I.e. the total len of the shortened input and the returned line is one less than the len of the original input.
+If there is no newline found, then the entire input is returned.
+In this case the input span is mutated such that buf now points to end.
+This makes it an empty span and thus a null span in our nomenclature, but it is still an empty span at a particular location.
+This convention of empty but localized spans allows us to perform comparisons without needing to handle them differently in the case of an empty span.
+*/
+
+span next_line(span *input) {
+  if (empty(*input)) return nullspan();
+  span line;
+  line.buf = input->buf;
+  while (input->buf < input->end && *input->buf != '\n') {
+    input->buf++;
+  }
+  line.end = input->buf;
+  if (input->buf < input->end) { // If '\n' found, move past it for next call
+    input->buf++;
+  }
+  return line;
+}
+
+/*
+In consume_prefix(span*,span) we are given a span which is typically something being parsed and another span which is expected to be a prefix of it.
+If the prefix is found, we return 1 and modify the span that is being parsed to remove the prefix.
+Otherwise we leave that span unmodified and return 0.
+Typical use is in an if statement to either identify and consume some prefix and then continue on to handle what follows it, or otherwise to skip the if and continue parsing the unmodified input.
+*/
+
+int consume_prefix(span *input, span prefix) {
+  if (len(*input) < len(prefix) || !span_eq(first_n(*input, len(prefix)), prefix)) {
+    return 0; // Prefix not found or input shorter than prefix
+  }
+  input->buf += len(prefix); // Remove prefix by advancing the start
+  return 1;
 }
 
 typedef struct {
@@ -417,6 +469,52 @@ span nullspan() {
 int bool_neq(int, int);
 
 int bool_neq(int a, int b) { return ( a || b ) && !( a && b); }
+
+/*
+C string routines are a notorious cause of errors.
+We are adding to our spanio library as needed to replace native C string methods with our own safer approach.
+We do not use null-terminated strings but instead rely on the explicit end point of our span type.
+Here we have spanspan(span,span) which is equivalent to strstr or memmem in the C library but for spans rather than C strings or void pointers respectively.
+We implement spanspan with memmem under the hood so we get the same performance.
+Like strstr or memmem, the arguments are in haystack, needle order, so remember to call spanspan with the thing you are looking for as the second arg.
+We return a span which is either NULL (i.e. nullspan()) or starts with the first location of needle and continues to the end of haystack.
+Examples:
+
+spanspan "abc" "b" -> "bc"
+spanspan "abc" "x" -> nullspan
+*/
+
+span spanspan(span haystack, span needle) {
+  // If needle is empty, return the full haystack as strstr does.
+  if (empty(needle)) return haystack;
+
+  // If the needle is larger than haystack, it cannot be found.
+  if (len(needle) > len(haystack)) return nullspan();
+
+  // Use memmem to find the first occurrence of needle in haystack.
+  void *result = memmem(haystack.buf, len(haystack), needle.buf, len(needle));
+
+  // If not found, return nullspan.
+  if (!result) return nullspan();
+
+  // Return a span starting from the found location to the end of haystack.
+  span found;
+  found.buf = result;
+  found.end = haystack.end;
+  return found;
+}
+
+// Checks if a given span is contained in a spans.
+// Returns 1 if found, 0 otherwise.
+// Actually a more useful function would return an index or -1, so we don't need another function when we care where the thing is.
+int is_one_of(span x, spans ys) {
+    for (int i = 0; i < ys.n; ++i) {
+        if (span_eq(x, ys.s[i])) {
+            return 1; // Found
+        }
+    }
+    return 0; // Not found
+}
 
 /* END LIBRARY CODE */
 
@@ -1012,7 +1110,7 @@ In this function we assume that stockfish has already been given the current pos
 We determine the number of positions from the output, use spans_alloc() to get a spans of that size, and then put each LAN move as a span into the spans, which we return.
 To parse the output of stockfish, we create a new span which is a copy of cmp, but which we will mutate as we parse it.
  *** manually fixed this to use the new get_stockfish_new_output() and set_stockfish_highwater() ***
-We use find_char(span, char), which returns an offset, to find the first colon, and head_n() to consume up to that colon.
+We use find_char(span, char), which returns an offset, to find the first colon, and take_n() to consume up to that colon.
 Then we can advance to the newline and consume that.
 Empty lines in the output will be skipped.
 Also, the Nodes searched line, which also contains a colon, should be skipped, not added as another "move".
@@ -1680,6 +1778,7 @@ It is not necessary to send flush() to send commands to stockfish; in fact this 
 */
 
 void parse_stockfish_output(span output, move *m);
+void parse_stockfish_output_2(span output, move *m, spans legal_moves);
 
 void analyze_move(StockfishProcess *sp, move *m) {
   // Set highwater mark for Stockfish output to identify new output generated by this command
@@ -1707,7 +1806,7 @@ void analyze_move(StockfishProcess *sp, move *m) {
 }
 
 // Global variable for Stockfish analysis time in milliseconds
-int analysis_time_ms = 10000; // Default value
+int analysis_time_ms = 1000; // Default value
 
 void analyze_move_2(StockfishProcess *sp, move *m) {
   // Set highwater mark for Stockfish output to identify new output generated by this command
@@ -1727,7 +1826,7 @@ void analyze_move_2(StockfishProcess *sp, move *m) {
   send_to_stockfish(sp, "stop\n");
 
   // Increase the wait time after sending stop to ensure all output is captured
-  usleep(1000 * 1000); // Wait for an additional 250 milliseconds
+  //usleep(250 * 1000); // Wait for an additional 250 milliseconds
 
   // Read output from Stockfish
   read_from_stockfish(sp);
@@ -1736,7 +1835,8 @@ void analyze_move_2(StockfishProcess *sp, move *m) {
   span output = get_stockfish_new_output(sp);
 
   // Parse the Stockfish output to extract move evaluations and update the move structure
-  parse_stockfish_output(output, m);
+  spans legal_moves = get_legal_lan_moves(sp); /* *** manual fixup *** */
+  parse_stockfish_output_2(output, m, legal_moves);
 }
 
 /*
@@ -1833,6 +1933,141 @@ void parse_stockfish_output(span output, move *m) {
     printf("Error: More than 128 legal moves found, exceeding allocation.\n");
     exit(EXIT_FAILURE); // Fail loudly if unexpectedly high number of moves
   }
+}
+
+/*
+Above was our first implementation of parse_stockfish_output. It eventually worked but required some manual fixups.
+
+Let us rewrite this code using span methods instead of char* C-style strings.
+In particular, this will solve the issue that we had in the original code of incorrectly searching (via strstr) past the end of the line that we had found, since strstr obviously looks until the next null byte, which does not exist in our input.
+
+Here we rewrite parse_stockfish_output function as parse_stockfish_output_2 using spans throughout.
+Additionally, we had a race condition in the above code where we might be getting stockfish output from the previous position, with moves for the other player.
+To handle this, we first call get_legal_lan_moves to get all the legal moves from stockfish in the current position.
+Then after find_pv_move when we have the lan move that we're about to add to the evals, before actually adding it we call another helper function to tell us if this span is one of the spans in the legal_moves.
+If it isn't, we simply skip it, and this solves the issue with incorrectly adding arrows from the previous half-move.
+*/
+
+// Declaration of additional helper functions that might be needed
+int parse_cp_eval(span line);
+span find_pv_move(span line);
+
+// Assume declaration of get_legal_lan_moves and is_legal_move helper functions
+int is_legal_move(span lan_move, spans legal_moves); // Checks if a LAN move is in the legal_moves list
+
+void parse_stockfish_output_2(span output, move *m, spans legal_moves) {
+
+  // Prepare for parsing
+  m->evals = (MoveEvaluation *)malloc(128 * sizeof(MoveEvaluation));
+  if (!m->evals) {
+    prt("Memory allocation failed\n");
+    flush();
+    exit(EXIT_FAILURE); // Fail loudly on allocation failure
+  }
+  m->n_evals = 0;
+
+  while (!empty(output)) {
+    span line = next_line(&output); // Extract the next line as a span
+
+    if (consume_prefix(&line, S("info"))) {
+      int cp_eval = parse_cp_eval(line); // Parse the cp or mate score
+      span lan_move = find_pv_move(line); // Find the first LAN move after "pv"
+
+      // Check if the LAN move is legal before updating or adding eval
+      if (!empty(lan_move) && is_legal_move(lan_move, legal_moves)) {
+        // Update or add eval for the move
+        update_or_add_eval(m, lan_move, cp_eval);
+      }
+    }
+  }
+
+  // Check for excessive legal moves
+  if (m->n_evals > 128) {
+    prt("Error: More than 128 legal moves found, exceeding allocation.\n");
+    flush();
+    exit(EXIT_FAILURE); // Fail loudly if unexpectedly high number of moves
+  }
+}
+
+// Wrapper to check if a LAN move is legal.
+// Uses is_one_of to search through the legal_moves provided.
+int is_legal_move(span lan_move, spans legal_moves) {
+    return is_one_of(lan_move, legal_moves);
+}
+
+/*
+In parse_cp_eval we get a line and parse either a "score cp <int>" or "score mate <int>" out of it.
+We convert the forced mate to either + or - 10000 so that they can be treated as cp evals downstream of this function.
+We use spanspan to find the location of " score " and indicate failure if it isn't found.
+We return the maximally negative int in case the line doesn't contain " score " or can't be parsed for some other reason.
+We get back from spanspan the string starting at that point " score " so we skip past that and then we look after this point for "cp " or "move " with consume_prefix() and then handle the int that follows.
+
+Example input lines:
+
+info depth 13 seldepth 22 multipv 1 score cp -26 nodes 681621 nps 680260 hashfull 302 tbhits 0 time 1002 pv g8f6 b1c3 e7e6 c1g5 f8e7 e2e3 e8g8 g5h4 f6e4 h4e7 d8e7 d1c2 e4f6 f1d3 d5c4 d3c4
+info depth 232 seldepth 3 multipv 3 score mate -1 nodes 754894 nps 5353858 tbhits 0 time 141 pv c2a4 a8a4
+info depth 1 seldepth 2 multipv 2 score mate 6 nodes 1258 nps 629000 tbhits 0 time 2 pv c7b7 b1a1
+
+Correct outputs:
+
+-26
+-10000
+10000
+*/
+
+int parse_cp_eval(span line) {
+  span score_span = S(" score ");
+  span cp_span = S("cp ");
+  span mate_span = S("mate ");
+  int fail_val = INT_MIN; // Return maximally negative int on failure
+
+  // Find " score " in the line
+  span score_section = spanspan(line, score_span);
+  if (empty(score_section)) return fail_val; // " score " not found
+
+  // Move past " score "
+  consume_prefix(&score_section, score_span);
+
+  // Check for "cp " or "mate "
+  if (consume_prefix(&score_section, cp_span)) {
+    // Parse cp value
+    return atoi((char *)score_section.buf);
+  } else if (consume_prefix(&score_section, mate_span)) {
+    // Parse mate value and convert to large cp value
+    int mate_in = atoi((char *)score_section.buf);
+    return mate_in > 0 ? 10000 : -10000;
+  }
+
+  // Parsing failed
+  return fail_val;
+}
+
+/*
+In find_pv_move we search for and move past " pv ".
+Then we handle a LAN move which will either be 4 or 5 chars and is followed by a space or possibly a newline.
+*/
+
+span find_pv_move(span line) {
+  span pv_span = S(" pv ");
+  span move;
+
+  // Search for " pv " in the line
+  span pv_section = spanspan(line, pv_span);
+  if (empty(pv_section)) return nullspan(); // " pv " not found
+
+  // Move past " pv "
+  consume_prefix(&pv_section, pv_span);
+
+  // Handle LAN move: it will either be 4 or 5 characters long
+  move.buf = pv_section.buf; // Start of the LAN move
+  move.end = move.buf + 4; // Assume 4 characters initially
+
+  // Check if the move is actually 5 characters long (4 chars + ' ' or '\n')
+  if (*(move.end) != ' ' && *(move.end) != '\n' && (move.end + 1) < pv_section.end) {
+    move.end += 1; // Include the fifth character
+  }
+
+  return move;
 }
 
 /*
@@ -2080,12 +2315,36 @@ void print_positions(Game *game, StockfishProcess *sp) {
 
 #define MAX_SPANS (1 << 20)
 
-int main() {
+int main(int argc, char *argv[]) {
   // This could come from parsing a command line flag like --print-fen, but just set manually for now.
   int just_print_fen = 0;
 
   init_spans(); // Initialize your spans and buffers
   span_arena_alloc(MAX_SPANS);
+
+  /*
+  We have a global variable analysis_time_ms, and we want to be able to set this from the command line. Write a few lines here to handle argc and argv and update this variable if a corresponding flag is provided, otherwise we will leave it set to the default (which was already initialized above).
+
+  We also have just_print_fen which is a debugging feature, but we can support this with a command line flag as well, if the flag is present we can set this to 1 and we'll get the debugging output with the FEN position for each move.
+
+  We also have --help which prints a short usage summary, using prt(), flush(), and exit(0).
+
+  For the command-line flags we use "--analysis-time", "--just-print-fen", and of course "--help".
+  */
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--analysis-time") == 0 && i + 1 < argc) {
+      analysis_time_ms = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--just-print-fen") == 0) {
+      just_print_fen = 1;
+    } else if (strcmp(argv[i], "--help") == 0) {
+      prt("Usage: %s [OPTIONS]\n", argv[0]);
+      prt("--analysis-time <milliseconds>     Set analysis time in milliseconds.\n");
+      prt("--just-print-fen                   Print FEN positions for debugging.\n");
+      prt("--help                             Display this help message.\n");
+      flush();
+      exit(0);
+    }
+  }
 
   read_and_count_stdin(); // Read the PGN data into the inp span
 

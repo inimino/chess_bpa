@@ -16,3 +16,7 @@ code_prompt() {
 build() {
   gcc -o bpa bpa.c
 }
+
+"""
+feel free to write function declarations for any helper or library funtions that we need but don't already have.
+"""
