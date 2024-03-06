@@ -619,11 +619,12 @@ typedef struct {
 } move;
 
 typedef struct {
-    span *tags;          // Array of spans, each representing a tag
-    int tag_count;       // Number of tags in the array
-    int max_tags;        // Allocated array size
-    move *moves;         // Array of moves
-    int move_count;      // Number of moves in the array
+  span *tags;              // Array of spans, each representing a tag
+  int tag_count;           // Number of tags in the array
+  int max_tags;            // Allocated array size
+  move *moves;             // Array of moves
+  int move_count;          // Number of moves in the array
+  spans startpos_comments; // comments on the starting position (before move 1)
 } Game;
 
 /*
@@ -658,7 +659,6 @@ void parse_pgn(span *input, Game *game);
 void parse_tag_section(span *input, Game *game);
 void parse_move_section(span *input, Game *game);
 span parse_tag(span *input);
-void parse_comment(span *input);
 span parse_result(span *input);
 
 void parse_pgn(span *input, Game *game) {
@@ -732,18 +732,6 @@ void parse_tag_section(span *input, Game *game) {
 
   if (debug_mode) {
     prt("Leaving parse_tag_section\n");
-  }
-}
-
-void parse_comment(span *input) {
-  if (*input->buf == '{') {
-    input->buf++; // Skip the opening brace
-    while (input->buf < input->end && *input->buf != '}') {
-      input->buf++; // Skip past the content of the comment
-    }
-    if (input->buf < input->end) {
-      input->buf++; // Skip the closing brace
-    }
   }
 }
 
@@ -877,6 +865,11 @@ move parse_move(span *input) {
 }
 
 int parse_move_number(span *input) {
+  if (debug_mode) {
+    prt("entering parse_move_number\n");
+    dbgd(len(*input));
+  }
+
   int move_number = 0;
 
   // Convert the sequence of digits to an integer
@@ -899,6 +892,10 @@ int parse_move_number(span *input) {
     exit2(1); // Exit if the format is incorrect
   }
 
+  if (debug_mode) {
+    prt("end of parse_move_number: returning %d\n", move_number);
+    dbgd(len(*input));
+  }
   return move_number;
 }
 
@@ -989,6 +986,9 @@ In parse_move_section we parse out the rest of the PGN file after the metadata i
 
 The only thing we are currently using from this is the move sequence on the main line.
 
+There can be comments in a PGN before the first move, these comments apply to the starting position, so first we parse those and store them on startpos_comments on the game if there are any.
+We call a helper function parse_startpos_comments(span*, Game*) to handle all of this.
+
 In a loop we first try to parse a result, which is one of a fixed number of short strings.
 If parse_result doesn't parse anything we then try to parse a move by calling parse_move, which handles everything from the move number on.
 Assumption: everything in the move section will be handled by either parse_move or parse_result.
@@ -996,10 +996,14 @@ Assumption: everything in the move section will be handled by either parse_move 
 In debug mode we indicate entering and leaving the function, as with all our parsing functions.
 */
 
+void parse_startpos_comments(span*, Game*);
+
 void parse_move_section(span *input, Game *game) {
   if (debug_mode) {
     prt("Entering parse_move_section\n");
   }
+
+  parse_startpos_comments(input, game);
 
   // Dynamically allocate an initial buffer for moves, may need resizing
   int capacity = 10; // Initial capacity for moves
@@ -1032,6 +1036,97 @@ void print_game(Game game) {
     wrs(game.moves[i].san); // Print the move
     terpri(); // Move to the next line
   }
+}
+
+/*
+There can be comments in a PGN before the first move, these comments apply to the starting position, so first we parse those and store them on startpos_comments on the game if there are any.
+We handle this with parse_startpos_comments().
+
+In debug mode, we prt when we enter and exit from the function, the length of the input span before and after, and the number of comments we parsed (and added to the Game).
+
+We need to alloc the right number of spans, so first we call parse_comment in a loop just to count the comments.
+We use empty() to determine if parse_comment consumed a comment or not.
+Then we call spans_alloc with this number, and that is the value that we store on the Game.
+
+We forward declare parse_comment, which takes the input span and returns either an empty span if there is no comment at the beginning of the input, or returns 
+a span containing the comment text, with the braces removed.
+Note this means we cannot roundtrip empty comments, but that's fine.
+*/
+
+// Forward declaration of parse_comment
+span parse_comment(span *input);
+
+void parse_startpos_comments(span *input, Game *game) {
+  if (debug_mode) {
+    prt("Entering parse_startpos_comments\n");
+    dbgd(len(*input));
+  }
+
+  int comment_count = 0;
+
+  // Count comments before the first move
+  span test_input = *input; // Copy input to avoid modifying the original
+  while (1) {
+    span comment = parse_comment(&test_input);
+    if (empty(comment)) break; // No more comments to process
+    comment_count++;
+  }
+
+  // Allocate space for comments
+  game->startpos_comments = spans_alloc(comment_count);
+  game->startpos_comments.n = comment_count;
+
+  // Actually parse and store the comments
+  for (int i = 0; i < comment_count; i++) {
+    span comment = parse_comment(input); // This time modify the original input
+    game->startpos_comments.s[i] = comment;
+  }
+
+  if (debug_mode) {
+    prt("Exiting parse_startpos_comments\n");
+    dbgd(len(*input));
+    dbgd(comment_count);
+  }
+}
+
+span parse_comment(span *input);
+
+/*
+In parse_comment, we skip any initial whitespace, then consume a opening curly brace if there is one.
+We read up to the next closing curly brace, and set the span between (and exclusive of) the curly braces as our return value.
+If there is no opening curly brace then there is no comment to parse and we indicate this by returning a null span.
+If we do not find a closing brace for a comment, then we print a message and abort as usual (prt, flush, exit).
+If we have parsed a comment, we also call skip_whitespace again to consume any trailing whitespace after the comment.
+*/
+
+span parse_comment(span *input) {
+  skip_whitespace(input); // Skip initial whitespace
+
+  if (input->buf < input->end && *input->buf == '{') {
+    input->buf++; // Skip opening curly brace
+
+    span comment_start = *input; // Start of comment text
+
+    // Search for closing brace
+    while (input->buf < input->end && *input->buf != '}') {
+      input->buf++;
+    }
+
+    if (input->buf < input->end) { // Found closing brace
+      span comment = {comment_start.buf, input->buf};
+      input->buf++; // Skip closing brace
+      skip_whitespace(input); // Skip trailing whitespace
+      return comment; // Return span containing the comment
+    } else {
+      // Did not find a closing brace, which is an error
+      prt("Error: Comment not closed with a '}'.\n");
+      flush();
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  // No opening curly brace, so no comment to parse
+  return (span){NULL, NULL};
 }
 
 /*
@@ -2313,44 +2408,59 @@ void print_positions(Game *game, StockfishProcess *sp) {
   }
 }
 
-#define MAX_SPANS (1 << 20)
+/*
+We have a global variable analysis_time_ms, and we want to be able to set this from the command line. Write a few lines here to handle argc and argv and update this variable if a corresponding flag is provided, otherwise we will leave it set to the default (which was already initialized above).
 
-int main(int argc, char *argv[]) {
-  // This could come from parsing a command line flag like --print-fen, but just set manually for now.
-  int just_print_fen = 0;
+We also have just_print_fen which is a debugging feature, but we can support this with a command line flag as well, if the flag is present we can set this to 1 and we'll get the debugging output with the FEN position for each move.
 
-  init_spans(); // Initialize your spans and buffers
-  span_arena_alloc(MAX_SPANS);
+We also have a debugging flag (global variable debug_mode) which we can turn on to print debugging information while parsing.
+(Despite the name, it is only relevant for the parsing phase.)
+This is useful if a PGN doesn't parse correctly.
 
-  /*
-  We have a global variable analysis_time_ms, and we want to be able to set this from the command line. Write a few lines here to handle argc and argv and update this variable if a corresponding flag is provided, otherwise we will leave it set to the default (which was already initialized above).
+We also have --help which prints a short usage summary, using prt(), flush(), and exit(0).
 
-  We also have just_print_fen which is a debugging feature, but we can support this with a command line flag as well, if the flag is present we can set this to 1 and we'll get the debugging output with the FEN position for each move.
+For the command-line flags we use "--analysis-time", "--just-print-fen", "--debug-parse", and of course "--help".
+*/
 
-  We also have --help which prints a short usage summary, using prt(), flush(), and exit(0).
+int just_print_fen = 0;
 
-  For the command-line flags we use "--analysis-time", "--just-print-fen", and of course "--help".
-  */
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--analysis-time") == 0 && i + 1 < argc) {
-      analysis_time_ms = atoi(argv[++i]);
+void parse_command_line_arguments(int argc, char *argv[]) {
+  for (int i = 1; i < argc; i++) { // Start from 1 to skip the program name
+    if (strcmp(argv[i], "--analysis-time") == 0) {
+      if (i + 1 < argc) { // Make sure there's another argument
+        analysis_time_ms = atoi(argv[++i]); // Convert next argument to int and increment i
+      }
     } else if (strcmp(argv[i], "--just-print-fen") == 0) {
-      just_print_fen = 1;
+      just_print_fen = 1; // Enable just print FEN mode
+    } else if (strcmp(argv[i], "--debug-parse") == 0) {
+      debug_mode = 1; // Enable debug mode for parsing
     } else if (strcmp(argv[i], "--help") == 0) {
-      prt("Usage: %s [OPTIONS]\n", argv[0]);
-      prt("--analysis-time <milliseconds>     Set analysis time in milliseconds.\n");
-      prt("--just-print-fen                   Print FEN positions for debugging.\n");
-      prt("--help                             Display this help message.\n");
+      // Print usage information
+      prt("Usage: %s [options]\n", argv[0]);
+      prt("Options:\n");
+      prt("  --analysis-time <ms>  Set analysis time for Stockfish (in milliseconds)\n");
+      prt("  --just-print-fen      Print FEN strings for each move and exit\n");
+      prt("  --debug-parse         Enable debug output for PGN parsing\n");
+      prt("  --help                Display this help and exit\n");
       flush();
       exit(0);
     }
   }
+}
+
+#define MAX_SPANS (1 << 20)
+
+int main(int argc, char *argv[]) {
+
+  init_spans(); // Initialize your spans and buffers
+  span_arena_alloc(MAX_SPANS);
+
+  parse_command_line_arguments(argc, argv);
 
   read_and_count_stdin(); // Read the PGN data into the inp span
 
   Game game = {0};
 
-  debug_mode = 0; // Set to 0 to disable debugging output
   parse_pgn(&inp, &game);
 
   // Print the moves from the parsed game

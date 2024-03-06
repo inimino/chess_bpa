@@ -58,6 +58,7 @@ This is the amount we let stockfish consider, so the number of half-moves in the
 - https://github.com/official-stockfish/Stockfish/wiki/UCI-&-Commands#standard-commands
 - https://backscattering.de/chess/uci/
 - https://www.chessprogramming.org/Portable_Game_Notation
+- https://www.thechessdrum.net/PGN_Reference.txt
 - https://github.com/fsmosca/PGN-Standard/blob/master/PGN-Standard.txt
 
 # Components / Phases
