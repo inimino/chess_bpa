@@ -1,3 +1,5 @@
+/* chess_bpa */
+
 #define _GNU_SOURCE // for memmem
 #include <stdlib.h>
 #include <stdio.h>
@@ -11,7 +13,6 @@
 #include <sys/wait.h>
 #include <ctype.h>
 #include <limits.h>
-
 /* convenient debugging macros */
 #define dbgd(x) prt(#x ": %d\n", x),flush()
 #define dbgx(x) prt(#x ": %x\n", x),flush()
@@ -518,12 +519,22 @@ int is_one_of(span x, spans ys) {
 
 /* END LIBRARY CODE */
 
+/* StockfishProcess
+
+This typedef struct contains everything we need and pass around for talking to the stockfish process.
+
+This includes a pid, an int[2] for the sending pipe and receiving pipe, called to_stockfish and from_stockfish resp. and a u8* cmp_highwater, which we use to know how much data is new in cmp after we pipe some stockfish output into there.
+*/
+
 typedef struct {
   pid_t pid;     // Process ID of the Stockfish process
   int to_stockfish[2]; // Pipe for sending data to Stockfish
   int from_stockfish[2]; // Pipe for receiving data from Stockfish
   u8* cmp_highwater; // Highwater mark of consumed output from Stockfish in cmp
 } StockfishProcess;
+
+/*
+*/
 
 void launch_stockfish(StockfishProcess *sp) {
   // Create pipes
@@ -592,6 +603,11 @@ void read_from_stockfish(StockfishProcess *sp) {
   }
 }
 
+/*
+We use cmp_highwater to determine how much of the output in cmp from the stockfish process is new after we send some particular command to stockfish.
+We manually indicate the highwater mark by calling set_stockfish_highwater and then use get_stockfish_new_output to get a span of the output past this point.
+*/
+
 void set_stockfish_highwater(StockfishProcess *sp) {
   sp->cmp_highwater = cmp.end;
 }
@@ -600,10 +616,29 @@ span get_stockfish_new_output(StockfishProcess *sp) {
   return (span){sp->cmp_highwater, cmp.end};
 }
 
+/*
+We use the MoveEvaluation to record each legal move in a position along with the stockfish evaluation of that move.
+This is what we use to generate the arrows.
+*/
+
 typedef struct {
     span lan_move; // The move in Long Algebraic Notation (LAN)
     int cp_eval;   // The centipawn evaluation of the move given by Stockfish
 } MoveEvaluation;
+
+/*
+The move struct is created when we parse our PGN input, and then we add to it as we move through the analysis process.
+During parsing we generate:
+- move_number, which we don't actually use for anything but it records what was in the PGN.
+- san
+- annotation
+- comments
+- move_sequence variations (commented out because not currently used)
+- the MoveEvaluation *evals
+
+There's a common pattern of some pointer and an int that go together for a dynamically-allocated array.
+We only partly support a lot of what's on this struct because we didn't really fully finish the parser, only the parts we needed.
+*/
 
 typedef struct {
   int move_number;
@@ -617,6 +652,13 @@ typedef struct {
   MoveEvaluation *evals; // Eval of every legal move from this position
   int n_evals; // number of evals; equal to number of legal moves at this point
 } move;
+
+/*
+The Game struct includes the metadata on the game, which is called "tags" in PGN, the moves themselves, and any comments on the starting position, which are the only ones that can't be stored on a move.
+
+We store the tags as a manually-managed array of spans because this predates the `spans` type.
+We store the moves themselves in a similar way.
+*/
 
 typedef struct {
   span *tags;              // Array of spans, each representing a tag
@@ -637,18 +679,6 @@ typedef struct {
  * and the move text (standard algebraic notation), ignoring annotations and variations for simplicity.
  * The function dynamically allocates memory for an array of spans, each representing a single move,
  * and returns a Game structure containing this array and the move count.
- *
- * Parameters:
- * - inp: A span containing the full PGN text of a chess game.
- *
- * Returns:
- * - A Game struct with two fields: a pointer to an array of move spans and the total move count.
- *   Each move span is a slice of the input span, pointing to the start and end of the move text.
- *
- * Note:
- * The caller is responsible for freeing the dynamically allocated memory for the moves array
- * in the Game struct to avoid memory leaks.
- * Error handling is minimal; malformed PGNs may lead to undefined behavior.
  */
 
 // Global flag for enabling debugging output
@@ -674,14 +704,19 @@ void parse_pgn(span *input, Game *game) {
   }
 }
 
+/*
+skip_whitespace takes a span pointer and advances it past any whitespace characters (as per isspace).
+*/
+
 void skip_whitespace(span *input) {
   while (input->buf < input->end && isspace(*input->buf)) {
     input->buf++;
   }
 }
-
 /* parse_tag is called when there is already an open square bracket at the front of the input.
 It parses up to the closing bracket, skips whitespace, and returns the tag as a span.
+
+Note: the handling of whitespace needs to be part of the contract.
 */
 
 span parse_tag(span *input) {
@@ -702,6 +737,10 @@ span parse_tag(span *input) {
   if (debug_mode) prt("exit parse_tag no parse (len %d)\n", len(*input));
   return (span){NULL, NULL}; // Return a null span to indicate failure
 }
+
+/*
+In parse_tag_section, we handle all the metadata at the start of a game.
+*/
 
 void parse_tag_section(span *input, Game *game) {
   if (debug_mode) {
@@ -776,20 +815,24 @@ void print_move(move m) {
     prt("  %.*s\n", m.comments[i].end - m.comments[i].buf, m.comments[i].buf);
   }
 
-/*
+  /*
   // Print variations
   prt("Variations:\n");
   for (int i = 0; i < m.num_variations; i++) {
     prt("  Variation %d:\n", i + 1);
     print_move_sequence(m.variations[i]); // Assuming print_move_sequence is defined to handle move_sequence type
   }
-*/
+  */
 }
 
 // Forward declaration of the parse_move_sequence function for recursion
 void parse_move_sequence(span *input);
 span parse_san(span *input);
 int parse_move_number(span*);
+
+/*
+In parse_move we handle a single half-move in the PGN, including comments and variations which follow it.
+*/
 
 move parse_move(span *input) {
   move m = {0};
@@ -864,6 +907,10 @@ move parse_move(span *input) {
   return m;
 }
 
+/*
+In parse_move_number we handle the digits themselves, and either one or three dots following the digits.
+*/
+
 int parse_move_number(span *input) {
   if (debug_mode) {
     prt("entering parse_move_number\n");
@@ -899,6 +946,9 @@ int parse_move_number(span *input) {
   return move_number;
 }
 
+/*
+We have is_san_char to indicate which chars can be part of a SAN move, and then parsing a SAN move is as simple as reading these chars into a span until we hit something that's not one of these.
+*/
 
 int is_san_char(char c) {
   return isalpha(c) || // Letter for piece or column
@@ -911,6 +961,10 @@ int is_san_char(char c) {
     c == '-'      // Part of castling notation
     ;
 }
+
+/*
+In parse_san we loop and accumulate chars into a span as long as they can be part of a SAN move, and then we also consume whitespace.
+*/
 
 span parse_san(span *input) {
   if (debug_mode) prt("enter parse_san (len %d)\n", len(*input));
@@ -944,6 +998,11 @@ span parse_san(span *input) {
   return san_move;
 }
 
+/*
+In parse_move_sequence (possibly mis-named?) we consume the moves inside a variation, which is enclosed in parens in PGN format.
+We look for the closing paren to know when the "move sequence" (really a variation) is ending, but we don't consume it (the caller will do that).
+*/
+
 void parse_move_sequence(span *input) {
   skip_whitespace(input);
   while (input->buf < input->end && *input->buf != ')') {
@@ -960,6 +1019,7 @@ void parse_move_sequence(span *input) {
 /*
 In parse_result we parse one of the four PGN result strings, and return a span.
 A null span indicates to the caller that nothing was parsed.
+The reason for this is that we parse a game by first trying to parse a result and only then, if there is no result at that position, then trying to parse a move.
 In debug mode we also print the game result that was parsed.
 */
 
@@ -991,7 +1051,8 @@ We call a helper function parse_startpos_comments(span*, Game*) to handle all of
 
 In a loop we first try to parse a result, which is one of a fixed number of short strings.
 If parse_result doesn't parse anything we then try to parse a move by calling parse_move, which handles everything from the move number on.
-Assumption: everything in the move section will be handled by either parse_move or parse_result.
+
+Everything in the move section will be handled by either parse_move or parse_result, i.e. comments and variations are both handled inside of parse_move.
 
 In debug mode we indicate entering and leaving the function, as with all our parsing functions.
 */
@@ -1031,13 +1092,17 @@ void parse_move_section(span *input, Game *game) {
   }
 }
 
+/*
+In print_game we print the SAN moves only, as a PGN parser debugging function.
+We use wrs and terpri to simply print each SAN move span on the Game.
+*/
+
 void print_game(Game game) {
   for (size_t i = 0; i < game.move_count; ++i) {
     wrs(game.moves[i].san); // Print the move
     terpri(); // Move to the next line
   }
 }
-
 /*
 There can be comments in a PGN before the first move, these comments apply to the starting position, so first we parse those and store them on startpos_comments on the game if there are any.
 We handle this with parse_startpos_comments().
@@ -1088,15 +1153,14 @@ void parse_startpos_comments(span *input, Game *game) {
     dbgd(comment_count);
   }
 }
-
-span parse_comment(span *input);
-
 /*
 In parse_comment, we skip any initial whitespace, then consume a opening curly brace if there is one.
 We read up to the next closing curly brace, and set the span between (and exclusive of) the curly braces as our return value.
 If there is no opening curly brace then there is no comment to parse and we indicate this by returning a null span.
 If we do not find a closing brace for a comment, then we print a message and abort as usual (prt, flush, exit).
 If we have parsed a comment, we also call skip_whitespace again to consume any trailing whitespace after the comment.
+
+Note that comments cannot nest as per the PGN spec and also they cannot contain curly braces at all (e.g. lichess just strips them if you try).
 */
 
 span parse_comment(span *input) {
@@ -1132,16 +1196,26 @@ span parse_comment(span *input) {
 /*
 SAN to LAN:
 
-- get a clean output of all the SAN moves on the main line and nothing else from the PGN - done
-- get position from stockfish as FEN
-- get candidate squares for the starting square from the position 
-- get legal moves as LAN from stockfish if needed for disambiguation
+We are given a Game object which contains the SAN moves from the PGN for all the moves in the game.
+
+Our task here is to convert each SAN move (like Nc3) into a LAN move (like b1c3), which we need to communicate with stockfish.
+
+In order to do that, we need to figure out the starting square that the piece (or pawn) was on.
+The destination square is already given in the SAN.
+
+The SAN does not contain the starting square (and the LAN does) but rather it contains the piece (or file for a pawn) and further contains disambiguation info, which is either a file, a rank, or both (in order of preference) as necessary if there would otherwise be more than one legal move matching the description in the given position.
+Therefore we need to consider both the current position and potentially the set of legal moves in that position in order to find the correct starting square.
+
+Here's our approach:
+
+1. Get position from stockfish as FEN string.
+2. Get candidate starting squares from the position, according to the piece type (or pawn file) and any disambiguation in the SAN.
+    - for example, if the SAN move is R8c6 then we only find rooks on the 8th rank (however, we will consider any rook on the 8th rank, regardless of the file, we do not also restrict to the c file, because we don't want this function to have to know how the rook moves; that is handled by the next step).
+3. Get legal moves as LAN from stockfish if needed for disambiguation. (If there is more than one piece of the given type (or pawn on the given file) on the board (and matching the SAN disambiguation if any) then only one of them can be a legal move, because otherwise the SAN would have contained further disambiguation.)
 
 */
+/* void poll_stockfish(span, int, StockfishProcess*);
 
-void poll_stockfish(span, int, StockfishProcess*);
-
-/*
 We read from stockfish in a loop, waiting a few ms each time, until the output contains the string provided.
 If that never happens, we will loop forever.
 To prevent this, we limit the maximum wait time to the second argument, which is in milliseconds.
@@ -1205,7 +1279,8 @@ In this function we assume that stockfish has already been given the current pos
 We determine the number of positions from the output, use spans_alloc() to get a spans of that size, and then put each LAN move as a span into the spans, which we return.
 To parse the output of stockfish, we create a new span which is a copy of cmp, but which we will mutate as we parse it.
  *** manually fixed this to use the new get_stockfish_new_output() and set_stockfish_highwater() ***
-We use find_char(span, char), which returns an offset, to find the first colon, and take_n() to consume up to that colon.
+In a loop, to parse the LAN moves out of the output (see example above):
+We use find_char to find the first colon, and take_n() to consume up to that colon.
 Then we can advance to the newline and consume that.
 Empty lines in the output will be skipped.
 Also, the Nodes searched line, which also contains a colon, should be skipped, not added as another "move".
@@ -1256,6 +1331,20 @@ void populate_lan_moves(Game*, StockfishProcess*);
 
 void send_position(StockfishProcess *sp, Game *game, int upto_move);
 span correlate_san_with_lan(span san_move, spans legal_lan_moves);
+
+/*
+The struct SanDetails stores information on the SAN move, which our PGN parser leaves intact as a span.
+Before we use it to find the corresponding LAN moves to send to stockfish, we need to parse it a bit further.
+We also indicate here whether the move is for white (with is_white_move), even though that's not part of the SAN format itself.
+Otherwise everything we include is from the SAN itself.
+- is_white_move
+- piece_moved
+- is_capture
+- disambiguation
+- destination_square
+- promotion_piece
+- check_indicator
+*/
 
 typedef struct {
   int is_white_move; // which player the move is for *** manually added ***
@@ -1484,7 +1573,7 @@ After sending "d\n", get_fen_from_stockfish polls until "Fen" appears, and then 
 
 We only care about the FEN, so we parse it line by line until we find a line starting with "Fen: ",
 strip this prefix, and return the FEN string in the buffer provided by the caller.
- *** manually fixed to start from sp->cmp_highwater instead of cmp.buf ***
+ *** manually fixed to start from sp->cmp_highwater instead of cmp.buf *** (can use the method for this)
 */
 
 void get_fen_from_stockfish(StockfishProcess *sp, char *fen, size_t fen_size) {
@@ -1670,7 +1759,10 @@ spans find_candidate_squares(char *fen, SanDetails san_details) {
   return result;
 }
 
-// Helper function to print spans for debugging
+/*
+Helper function to print spans for debugging
+*/
+
 void print_spans(spans s) {
     printf("Candidate Squares:\n");
     for (int i = 0; i < s.n; ++i) {
@@ -1679,6 +1771,8 @@ void print_spans(spans s) {
 }
 
 /*
+This is part of finding the candidate starting squares for a SAN move, given that we also have a FEN of the current position.
+
 In square_matches_piece we get a FEN char, one of KQBNRP upper or lower, a file, and a SAN piece char, one of 'a'-'h' lowercase, or KQBNR, which are upper for both w and b in SAN moves.
 We get a file which tells where the FEN char was in the FEN, and an indication of who has the move.
 We return true if the FEN char matches the piece type, color, and in the case of a pawn, the file indicated by the SAN piece char.
@@ -1719,8 +1813,6 @@ int square_matches_piece(char fen_char, int file, char piece, int is_white_move)
   //dbgd(fen_piece_type == san_piece_to_fen);flush();
   return (fen_piece_type == san_piece_to_fen);
 }
-
-
 /*
 Helper function to check if the current square matches the disambiguation criteria.
 The SAN disambiguation is either a rank "a"-"h" or a file "1"-"8" or both like "d4", or nothing.
@@ -1870,6 +1962,10 @@ We wait for 250ms after sending stop, then we call read_from_stockfish to get it
 Then we pass the move into a further helper function which will parse the lines in cmp.
 We call new_output to get the output after the previous highwater mark which was generated by our command, which we also pass into the helper function.
 It is not necessary to send flush() to send commands to stockfish; in fact this has nothing to do with stockfish but actually flushes our output space to stdout, so stop calling flush after send_to_stockfish.
+
+We had a race condition here, which we first tried to fix by waiting, and then later fixed more completely by checking if the moves that stockfish evaluates are legal moves for the player who has the move in the current position.
+However, this does not fully solve the problem, as for example, a queen that captures a queen will still have most of the same legal moves (in LAN) on the next half-move.
+Perhaps there's other info in the info line that we can use to disambiguate further.
 */
 
 void parse_stockfish_output(span output, move *m);
@@ -2197,6 +2293,10 @@ void update_or_add_eval(move *m, span lan_move, int cp_eval) {
   }
 }
 
+/*
+Debugging helper function.
+*/
+
 void print_all_move_evals(Game *game) {
   for (int i = 0; i < game->move_count; ++i) {
     move current_move = game->moves[i];
@@ -2243,6 +2343,8 @@ As usual, when we get invalid input or cannot proceed, we simply print a message
 
 After each move (or half move) we just print a space, to keep the PGN output compact, as newlines are not required.
 We do include one newline at the end, though, so that our output ends with a newline as a text file always should.
+
+(The _2 version fixes the order of the move arrows and some move number issue.)
 */
 
 typedef enum { WINNING, DRAWN, LOSING } position_evaluation;
@@ -2314,6 +2416,10 @@ void produce_output_2(Game *game) {
   terpri();
   flush(); // Ensure all output is printed
 }
+
+/*
+Here we implement our thresholding classification from the centipawn eval into our categorical win, loss, or draw classes.
+*/
 
 position_evaluation evaluate_position(int cp_eval) {
   if (cp_eval > 150) return WINNING;
@@ -2447,6 +2553,10 @@ void parse_command_line_arguments(int argc, char *argv[]) {
     }
   }
 }
+
+/*
+partly hand-written main() function as also used for debugging, testing partial code, etc.
+*/
 
 #define MAX_SPANS (1 << 20)
 
